@@ -5,38 +5,47 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Base oficial
 const CARTOLA_BASE = "https://api.cartolafc.globo.com";
 
-// Helper: fetch com timeout
 async function fetchJson(url, timeoutMs = 15000) {
   const ctrl = new AbortController();
   const timeout = setTimeout(() => ctrl.abort(), timeoutMs);
 
   try {
     const res = await fetch(url, { signal: ctrl.signal });
-
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       throw new Error(`HTTP ${res.status} - ${text.slice(0, 200)}`);
     }
-
     return await res.json();
   } finally {
     clearTimeout(timeout);
   }
 }
 
-// Helper: resposta segura + cache curto
 function safeSend(res, data) {
-  res.set("Cache-Control", "public, max-age=30"); // 30s
+  res.set("Cache-Control", "public, max-age=30");
   res.json(data);
 }
 
-// 1) health
+function formatFechamento(f) {
+  if (!f || f.dia == null) return "indisponível";
+  const dd = String(f.dia).padStart(2, "0");
+  const mm = String(f.mes).padStart(2, "0");
+  const yyyy = String(f.ano);
+  const hh = String(f.hora).padStart(2, "0");
+  const min = String(f.minuto).padStart(2, "0");
+  return `${dd}/${mm}/${yyyy} ${hh}:${min}`;
+}
+
+function formatCartoleta(v) {
+  if (typeof v !== "number") return "indisponível";
+  // padrão C$ 10.50
+  return `C$ ${v.toFixed(2)}`;
+}
+
 app.get("/health", (req, res) => safeSend(res, { ok: true }));
 
-// 2) rodada (compacto)
 app.get("/rodada", async (req, res) => {
   try {
     const data = await fetchJson(`${CARTOLA_BASE}/mercado/status`);
@@ -46,86 +55,54 @@ app.get("/rodada", async (req, res) => {
       temporada: data.temporada ?? null,
       bola_rolando: data.bola_rolando ?? null,
       nome_rodada: data.nome_rodada ?? null,
-      fechamento: data.fechamento ?? null,
+      fechamento: data.fechamento ?? null
     });
   } catch (err) {
-    res.status(502).json({
-      message: "Falha ao buscar /mercado/status",
-      error: String(err?.message || err),
-    });
+    res.status(502).json({ message: "Falha ao buscar /mercado/status", error: String(err?.message || err) });
   }
 });
 
-// 3) partidas (compacto)
 app.get("/partidas", async (req, res) => {
   try {
     const data = await fetchJson(`${CARTOLA_BASE}/partidas`);
-    const partidas = Array.isArray(data?.partidas)
-      ? data.partidas
-      : Array.isArray(data)
-      ? data
-      : [];
-
-    const compact = partidas.map((p) => ({
-      partida_id: p.partida_id ?? null,
-      partida_data: p.partida_data ?? null,
-      local: p.local ?? null,
-      clube_casa_id: p.clube_casa_id ?? null,
-      clube_visitante_id: p.clube_visitante_id ?? null,
-      placar_oficial_mandante: p.placar_oficial_mandante ?? null,
-      placar_oficial_visitante: p.placar_oficial_visitante ?? null,
-      status_transmissao_tr: p.status_transmissao_tr ?? null,
-      periodo_tr: p.periodo_tr ?? null,
-      valida: p.valida ?? null,
-    }));
-
-    safeSend(res, { partidas: compact });
-  } catch (err) {
-    res.status(502).json({
-      message: "Falha ao buscar /partidas",
-      error: String(err?.message || err),
+    const partidas = Array.isArray(data?.partidas) ? data.partidas : (Array.isArray(data) ? data : []);
+    safeSend(res, {
+      partidas: partidas.map((p) => ({
+        partida_id: p.partida_id ?? null,
+        partida_data: p.partida_data ?? null,
+        local: p.local ?? null,
+        clube_casa_id: p.clube_casa_id ?? null,
+        clube_visitante_id: p.clube_visitante_id ?? null,
+        placar_oficial_mandante: p.placar_oficial_mandante ?? null,
+        placar_oficial_visitante: p.placar_oficial_visitante ?? null,
+        status_transmissao_tr: p.status_transmissao_tr ?? null,
+        periodo_tr: p.periodo_tr ?? null,
+        valida: p.valida ?? null
+      }))
     });
+  } catch (err) {
+    res.status(502).json({ message: "Falha ao buscar /partidas", error: String(err?.message || err) });
   }
 });
 
-// 4) clubes (compacto)
 app.get("/clubes", async (req, res) => {
   try {
     const data = await fetchJson(`${CARTOLA_BASE}/clubes`);
     const out = {};
-
     for (const [k, v] of Object.entries(data || {})) {
       out[k] = {
         id: v?.id ?? null,
         nome: v?.nome ?? null,
         abreviacao: v?.abreviacao ?? null,
-        nome_fantasia: v?.nome_fantasia ?? null,
+        nome_fantasia: v?.nome_fantasia ?? null
       };
     }
-
     safeSend(res, out);
   } catch (err) {
-    res.status(502).json({
-      message: "Falha ao buscar /clubes",
-      error: String(err?.message || err),
-    });
+    res.status(502).json({ message: "Falha ao buscar /clubes", error: String(err?.message || err) });
   }
 });
 
-/**
- * 5) atletas/mercado-resumo (PAGINADO + FILTRÁVEL) -> NÃO ESTOURA MAIS
- *
- * Query params:
- * - limit (default 100, max 200)
- * - offset (default 0)
- * - posicao_id (opcional)
- * - status_id (opcional)
- *
- * Exemplos:
- * /atletas/mercado-resumo?limit=50
- * /atletas/mercado-resumo?posicao_id=5&limit=100
- * /atletas/mercado-resumo?posicao_id=1&status_id=7&limit=80
- */
 app.get("/atletas/mercado-resumo", async (req, res) => {
   try {
     const data = await fetchJson(`${CARTOLA_BASE}/atletas/mercado`);
@@ -160,40 +137,31 @@ app.get("/atletas/mercado-resumo", async (req, res) => {
         status_id: a?.status_id ?? null,
         preco_num: a?.preco_num ?? null,
         media_num: a?.media_num ?? null,
-        jogos_num: a?.jogos_num ?? null,
-      })),
+        jogos_num: a?.jogos_num ?? null
+      }))
     });
   } catch (err) {
-    res.status(502).json({
-      message: "Falha ao buscar /atletas/mercado",
-      error: String(err?.message || err),
-    });
+    res.status(502).json({ message: "Falha ao buscar /atletas/mercado", error: String(err?.message || err) });
   }
 });
 
 /**
- * 6) recomendar (LEVE) -> devolve só 11 jogadores (4-4-2)
- * Sem baixar a lista inteira no GPT.
- *
- * Heurística simples:
- * - se status_id existir, prioriza status_id = 7 (provável) (se esse id não bater, você troca depois)
- * - prioriza quem joga em casa
- * - depois media_num e preco_num
+ * /recomendar: devolve o que o GPT precisa IMPRIMIR, sem inventar.
+ * - resumo (linhas prontas)
+ * - jogos_ataque (strings)
+ * - jogos_defesa (strings)
+ * - escalacao (por setor, já formatado)
  */
 app.get("/recomendar", async (req, res) => {
   try {
-    const mercado = await fetchJson(`${CARTOLA_BASE}/atletas/mercado`);
+    const rodada = await fetchJson(`${CARTOLA_BASE}/mercado/status`);
     const partidasData = await fetchJson(`${CARTOLA_BASE}/partidas`);
     const clubesData = await fetchJson(`${CARTOLA_BASE}/clubes`);
-
-    const atletas = Array.isArray(mercado?.atletas) ? mercado.atletas : [];
-    const partidas = Array.isArray(partidasData?.partidas)
-      ? partidasData.partidas
-      : Array.isArray(partidasData)
-      ? partidasData
-      : [];
+    const mercado = await fetchJson(`${CARTOLA_BASE}/atletas/mercado`);
 
     const clubes = clubesData || {};
+    const partidas = Array.isArray(partidasData?.partidas) ? partidasData.partidas : (Array.isArray(partidasData) ? partidasData : []);
+    const atletas = Array.isArray(mercado?.atletas) ? mercado.atletas : [];
 
     // mapa clube -> casa/fora
     const clubIsHome = new Map();
@@ -202,7 +170,7 @@ app.get("/recomendar", async (req, res) => {
       if (p?.clube_visitante_id) clubIsHome.set(p.clube_visitante_id, false);
     }
 
-    // filtro "provável" se existir status
+    // tentativa de status "provável": mantém o que você já usou (7), mas sem quebrar
     const existeStatus = atletas.some((a) => a?.status_id !== undefined && a?.status_id !== null);
     const elegiveis = existeStatus ? atletas.filter((a) => a.status_id === 7) : atletas;
 
@@ -213,49 +181,81 @@ app.get("/recomendar", async (req, res) => {
       return home * 1000 + media * 10 + preco * 0.1;
     }
 
+    function nomeClube(clubeId) {
+      return clubes[String(clubeId)]?.nome_fantasia ?? "indisponível";
+    }
+
+    function casaFora(clubeId) {
+      const v = clubIsHome.get(clubeId);
+      return v === true ? "Casa" : v === false ? "Fora" : "indisponível";
+    }
+
     function pickByPos(posicao_id, n) {
       return elegiveis
         .filter((a) => a?.posicao_id === posicao_id)
         .sort((a, b) => score(b) - score(a))
         .slice(0, n)
         .map((a) => {
-          const casa = clubIsHome.get(a?.clube_id);
+          const clubeId = a?.clube_id ?? null;
+          const nome = a?.apelido ?? a?.nome ?? "indisponível";
+          const preco = formatCartoleta(a?.preco_num);
+          const cf = clubeId ? casaFora(clubeId) : "indisponível";
+          const time = clubeId ? nomeClube(clubeId) : "indisponível";
+          const motivo = cf === "Casa" ? "Joga em casa" : "Boa opção";
+
           return {
             atleta_id: a?.atleta_id ?? null,
-            nome: a?.apelido ?? a?.nome ?? null,
-            clube_id: a?.clube_id ?? null,
-            clube: clubes[String(a?.clube_id)]?.nome_fantasia ?? "indisponível",
-            casa_fora: casa === true ? "Casa" : casa === false ? "Fora" : "indisponível",
-            preco: a?.preco_num ?? null,
-            motivo: casa === true ? "Joga em casa" : "Boa opção",
+            nome,
+            time,
+            casa_fora: cf,
+            preco,
+            motivo
           };
         });
     }
 
-    // Posições comuns do Cartola:
-    // 1 GOL, 2 LAT, 3 ZAG, 4 MEI, 5 ATA
-    const time = {
-      goleiro: pickByPos(1, 1),
-      laterais: pickByPos(2, 2),
-      zagueiros: pickByPos(3, 2),
-      meias: pickByPos(4, 4),
-      atacantes: pickByPos(5, 2),
-    };
+    // posições comuns: 1 GOL, 2 LAT, 3 ZAG, 4 MEI, 5 ATA
+    const goleiro = pickByPos(1, 1);
+    const laterais = pickByPos(2, 2);
+    const zagueiros = pickByPos(3, 2);
+    const meias = pickByPos(4, 4);
+    const atacantes = pickByPos(5, 2);
+
+    // jogos: só lista 2 encerrados como exemplo (MVP), sem inventar “favorável”
+    // (depois a gente cria critério de favorável)
+    const encerradas = partidas
+      .filter((p) => p?.status_transmissao_tr === "ENCERRADA")
+      .slice(0, 2)
+      .map((p) => {
+        const casa = nomeClube(p.clube_casa_id);
+        const fora = nomeClube(p.clube_visitante_id);
+        return `${casa} x ${fora}`;
+      });
+
+    const resumo = [
+      `Rodada atual: ${rodada?.rodada_atual ?? "indisponível"}`,
+      `Status do mercado: ${rodada?.status_mercado ?? "indisponível"}`,
+      `Bola rolando: ${rodada?.bola_rolando ?? "indisponível"}`,
+      `Fechamento: ${formatFechamento(rodada?.fechamento)}`
+    ];
 
     safeSend(res, {
-      rodada: mercado?.rodada_atual ?? null,
       formacao: "4-4-2",
       criterio: existeStatus ? "status_id=7 + casa + media + preco" : "casa + media + preco",
-      time,
+      resumo,
+      jogos_ataque: encerradas.length ? encerradas : ["indisponível", "indisponível"],
+      jogos_defesa: encerradas.length ? encerradas : ["indisponível", "indisponível"],
+      escalacao: {
+        goleiro,
+        defesa: [...laterais, ...zagueiros],
+        meio: meias,
+        ataque: atacantes
+      }
     });
   } catch (err) {
-    res.status(502).json({
-      message: "Falha ao recomendar",
-      error: String(err?.message || err),
-    });
+    res.status(502).json({ message: "Falha ao recomendar", error: String(err?.message || err) });
   }
 });
 
-// Porta do Render / local
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`API rodando na porta ${PORT}`));
