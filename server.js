@@ -40,8 +40,18 @@ function formatFechamento(f) {
 
 function formatCartoleta(v) {
   if (typeof v !== "number") return "indisponível";
-  // padrão C$ 10.50
+  // sempre com ponto, 2 casas
   return `C$ ${v.toFixed(2)}`;
+}
+
+function linhaJogador(p) {
+  // linha 100% pronta para imprimir
+  const nome = p?.nome ?? "indisponível";
+  const time = p?.time ?? "indisponível";
+  const casa_fora = p?.casa_fora ?? "indisponível";
+  const preco = p?.preco ?? "indisponível";
+  const motivo = p?.motivo ?? "indisponível";
+  return `${nome} – ${time} – ${casa_fora} – ${preco} – ${motivo}`;
 }
 
 app.get("/health", (req, res) => safeSend(res, { ok: true }));
@@ -145,13 +155,6 @@ app.get("/atletas/mercado-resumo", async (req, res) => {
   }
 });
 
-/**
- * /recomendar: devolve o que o GPT precisa IMPRIMIR, sem inventar.
- * - resumo (linhas prontas)
- * - jogos_ataque (strings)
- * - jogos_defesa (strings)
- * - escalacao (por setor, já formatado)
- */
 app.get("/recomendar", async (req, res) => {
   try {
     const rodada = await fetchJson(`${CARTOLA_BASE}/mercado/status`);
@@ -163,14 +166,12 @@ app.get("/recomendar", async (req, res) => {
     const partidas = Array.isArray(partidasData?.partidas) ? partidasData.partidas : (Array.isArray(partidasData) ? partidasData : []);
     const atletas = Array.isArray(mercado?.atletas) ? mercado.atletas : [];
 
-    // mapa clube -> casa/fora
     const clubIsHome = new Map();
     for (const p of partidas) {
       if (p?.clube_casa_id) clubIsHome.set(p.clube_casa_id, true);
       if (p?.clube_visitante_id) clubIsHome.set(p.clube_visitante_id, false);
     }
 
-    // tentativa de status "provável": mantém o que você já usou (7), mas sem quebrar
     const existeStatus = atletas.some((a) => a?.status_id !== undefined && a?.status_id !== null);
     const elegiveis = existeStatus ? atletas.filter((a) => a.status_id === 7) : atletas;
 
@@ -202,35 +203,20 @@ app.get("/recomendar", async (req, res) => {
           const cf = clubeId ? casaFora(clubeId) : "indisponível";
           const time = clubeId ? nomeClube(clubeId) : "indisponível";
           const motivo = cf === "Casa" ? "Joga em casa" : "Boa opção";
-
-          return {
-            atleta_id: a?.atleta_id ?? null,
-            nome,
-            time,
-            casa_fora: cf,
-            preco,
-            motivo
-          };
+          return { atleta_id: a?.atleta_id ?? null, nome, time, casa_fora: cf, preco, motivo };
         });
     }
 
-    // posições comuns: 1 GOL, 2 LAT, 3 ZAG, 4 MEI, 5 ATA
     const goleiro = pickByPos(1, 1);
     const laterais = pickByPos(2, 2);
     const zagueiros = pickByPos(3, 2);
     const meias = pickByPos(4, 4);
     const atacantes = pickByPos(5, 2);
 
-    // jogos: só lista 2 encerrados como exemplo (MVP), sem inventar “favorável”
-    // (depois a gente cria critério de favorável)
     const encerradas = partidas
       .filter((p) => p?.status_transmissao_tr === "ENCERRADA")
       .slice(0, 2)
-      .map((p) => {
-        const casa = nomeClube(p.clube_casa_id);
-        const fora = nomeClube(p.clube_visitante_id);
-        return `${casa} x ${fora}`;
-      });
+      .map((p) => `${nomeClube(p.clube_casa_id)} x ${nomeClube(p.clube_visitante_id)}`);
 
     const resumo = [
       `Rodada atual: ${rodada?.rodada_atual ?? "indisponível"}`,
@@ -239,18 +225,26 @@ app.get("/recomendar", async (req, res) => {
       `Fechamento: ${formatFechamento(rodada?.fechamento)}`
     ];
 
+    const jogos_ataque = encerradas.length ? encerradas : ["indisponível", "indisponível"];
+    const jogos_defesa = encerradas.length ? encerradas : ["indisponível", "indisponível"];
+
+    const defesa = [...laterais, ...zagueiros];
+
+    // LINHAS PRONTAS (o GPT só imprime isso)
+    const linhas_prontas = {
+      resumo,
+      jogos_ataque,
+      jogos_defesa,
+      goleiro: goleiro.length ? [linhaJogador(goleiro[0])] : ["indisponível"],
+      defesa: defesa.map(linhaJogador),
+      meio: meias.map(linhaJogador),
+      ataque: atacantes.map(linhaJogador)
+    };
+
     safeSend(res, {
       formacao: "4-4-2",
       criterio: existeStatus ? "status_id=7 + casa + media + preco" : "casa + media + preco",
-      resumo,
-      jogos_ataque: encerradas.length ? encerradas : ["indisponível", "indisponível"],
-      jogos_defesa: encerradas.length ? encerradas : ["indisponível", "indisponível"],
-      escalacao: {
-        goleiro,
-        defesa: [...laterais, ...zagueiros],
-        meio: meias,
-        ataque: atacantes
-      }
+      linhas_prontas
     });
   } catch (err) {
     res.status(502).json({ message: "Falha ao recomendar", error: String(err?.message || err) });
